@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voucher Kas Keluar</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen p-4 md:p-8 text-slate-800">
+<div class="max-w-4xl mx-auto bg-white rounded-xl shadow">
+  <header class="bg-indigo-600 text-white rounded-t-xl px-6 py-4">
+    <h1 class="text-xl font-semibold">Voucher Transaksi Kas Keluar</h1>
+    <p class="text-sm text-indigo-100">Entri jurnal pengeluaran kas/bank dengan validasi zero-discrepancy</p>
+  </header>
+
+  <main class="p-6 space-y-5">
+    <div class="grid md:grid-cols-3 gap-4">
+      <label class="block text-sm">Tanggal
+        <input id="trxDate" type="date" class="mt-1 w-full border rounded px-3 py-2"></label>
+      <label class="block text-sm md:col-span-2">Nomor Bukti (unik)
+        <input id="refNo" type="text" placeholder="Contoh: BKK-2026-010" class="mt-1 w-full border rounded px-3 py-2"></label>
+    </div>
+    <label class="block text-sm">Deskripsi Transaksi
+      <input id="desc" type="text" placeholder="Penjelasan singkat pengeluaran kas" class="mt-1 w-full border rounded px-3 py-2"></label>
+
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-slate-500 border-b">
+          <tr><th class="text-left py-2">Akun</th><th class="text-left">Arus Kas</th>
+              <th class="text-right">Debit</th><th class="text-right">Kredit</th><th></th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+        <tfoot class="border-t font-semibold">
+          <tr><td colspan="2" class="text-right py-2 pr-3">Total</td>
+              <td id="totD" class="text-right pr-1">0,00</td><td id="totK" class="text-right pr-1">0,00</td><td></td></tr>
+          <tr><td colspan="2" class="text-right py-1 pr-3">Selisih</td>
+              <td id="diff" colspan="2" class="text-right pr-1">0,00</td><td></td></tr>
+        </tfoot>
+      </table>
+    </div>
+
+    <div id="indicator" class="rounded-lg px-4 py-3 text-sm font-medium bg-slate-100 text-slate-600">Belum ada transaksi</div>
+    <ul id="errors" class="text-xs text-red-600 list-disc pl-5 space-y-0.5"></ul>
+
+    <div class="flex justify-between">
+      <button id="addRow" type="button" class="border rounded px-3 py-2 text-sm hover:bg-slate-50">+ Tambah Baris</button>
+      <button id="submitBtn" type="button" disabled
+              class="bg-indigo-600 text-white rounded px-5 py-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed">Simpan Transaksi</button>
+    </div>
+    <pre id="result" class="hidden text-xs bg-slate-900 text-green-300 rounded p-3 overflow-x-auto"></pre>
+  </main>
+</div>
+
+<script>
+/* ---- Konfigurasi Supabase (publishable key aman di frontend selama RLS aktif) ---- */
+const SUPABASE_URL = "https://mcvlqfouqpzqkropfumz.supabase.co";
+const SUPABASE_KEY = "sb_publishable_iaJ6I3T2KNPWigydDWqxTQ__FovODBG";
+const HEADERS = { "Content-Type": "application/json", apikey: SUPABASE_KEY, Authorization: "Bearer " + SUPABASE_KEY };
+
+/* Akun contoh (dipakai bila tabel chart_of_accounts belum bisa dibaca) */
+let accounts = [
+  { account_id: 1, account_code: "1-1100", account_name: "Kas", is_cash: true },
+  { account_id: 2, account_code: "1-1200", account_name: "Bank", is_cash: true },
+  { account_id: 3, account_code: "1-1300", account_name: "Persediaan Barang Dagang", is_cash: false },
+  { account_id: 4, account_code: "2-1100", account_name: "Utang Usaha", is_cash: false },
+  { account_id: 7, account_code: "5-2100", account_name: "Beban Listrik", is_cash: false },
+  { account_id: 8, account_code: "5-2200", account_name: "Beban Gaji", is_cash: false },
+];
+const CF = ["", "OPERASI", "INVESTASI", "PENDANAAN"];
+const $ = (id) => document.getElementById(id);
+const fmt = (c) => (c / 100).toLocaleString("id-ID", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const toCents = (v) => Math.round((parseFloat(v) || 0) * 100);   // hindari galat floating point
+
+function optionsHtml() {
+  return '<option value="">-- Pilih Akun --</option>' + accounts.map(a =>
+    `<option value="${a.account_id}">${a.account_code} - ${a.account_name}${a.is_cash ? " (Kas/Bank)" : ""}</option>`).join("");
+}
+function addRow() {
+  const tr = document.createElement("tr");
+  tr.className = "border-b";
+  tr.innerHTML = `
+    <td class="py-1 pr-2"><select class="acc w-full border rounded px-2 py-1.5">${optionsHtml()}</select></td>
+    <td class="pr-2"><select class="cf border rounded px-2 py-1.5">${CF.map(c => `<option>${c}</option>`).join("")}</select></td>
+    <td class="pr-1"><input type="number" min="0" step="0.01" placeholder="0" class="deb w-32 border rounded px-2 py-1.5 text-right"></td>
+    <td class="pr-1"><input type="number" min="0" step="0.01" placeholder="0" class="cre w-32 border rounded px-2 py-1.5 text-right"></td>
+    <td><button type="button" class="del text-red-500 px-2" title="Hapus baris">&times;</button></td>`;
+  tr.querySelector(".del").onclick = () => { tr.remove(); validate(); };
+  tr.querySelectorAll("select,input").forEach(el => el.addEventListener("input", validate));
+  $("rows").appendChild(tr);
+}
+function readLines() {
+  return [...$("rows").children].map(tr => ({
+    account_id: parseInt(tr.querySelector(".acc").value) || null,
+    cash_flow_category: tr.querySelector(".cf").value,
+    debit: toCents(tr.querySelector(".deb").value),
+    credit: toCents(tr.querySelector(".cre").value),
+  }));
+}
+function validate() {
+  const lines = readLines();
+  const totD = lines.reduce((s, l) => s + l.debit, 0);
+  const totK = lines.reduce((s, l) => s + l.credit, 0);
+  const diff = totD - totK;
+  $("totD").textContent = fmt(totD); $("totK").textContent = fmt(totK); $("diff").textContent = fmt(diff);
+
+  const errs = [];
+  if (!$("trxDate").value) errs.push("Tanggal wajib diisi.");
+  if (!$("refNo").value.trim()) errs.push("Nomor bukti wajib diisi.");
+  if (!$("desc").value.trim()) errs.push("Deskripsi wajib diisi.");
+  if (lines.length < 2) errs.push("Minimal 2 baris jurnal.");
+  if (lines.some(l => !l.account_id)) errs.push("Semua baris harus memilih akun.");
+  if (lines.some(l => l.debit === 0 && l.credit === 0)) errs.push("Baris tidak boleh debit dan kredit sama-sama nol.");
+  if (lines.some(l => l.debit > 0 && l.credit > 0)) errs.push("Satu baris hanya boleh debit ATAU kredit.");
+  const isCash = (id) => (accounts.find(a => a.account_id === id) || {}).is_cash;
+  if (!lines.some(l => l.credit > 0 && isCash(l.account_id))) errs.push("Voucher kas keluar harus mengkredit minimal satu akun Kas/Bank.");
+
+  const ind = $("indicator");
+  const empty = totD === 0 && totK === 0;
+  const balanced = !empty && diff === 0;
+  ind.className = "rounded-lg px-4 py-3 text-sm font-medium " +
+    (empty ? "bg-slate-100 text-slate-600" : balanced ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800");
+  ind.textContent = empty ? "Belum ada transaksi"
+    : balanced ? "SEIMBANG: Total Debit = Total Kredit"
+    : "TIDAK SEIMBANG: selisih " + fmt(Math.abs(diff)) + (diff > 0 ? " (debit lebih besar)" : " (kredit lebih besar)");
+
+  if (!balanced && !empty) errs.unshift("Total debit harus sama dengan total kredit.");
+  $("errors").innerHTML = errs.map(e => `<li>${e}</li>`).join("");
+  $("submitBtn").disabled = !(balanced && errs.length === 0);   // asas zero-discrepancy
+}
+async function submit() {
+  validate();
+  if ($("submitBtn").disabled) return;                           // jaga-jaga bila tombol dimanipulasi
+  const payload = {
+    p_trx_date: $("trxDate").value, p_ref_no: $("refNo").value.trim(), p_description: $("desc").value.trim(),
+    p_lines: readLines().map(l => ({ ...l, debit: l.debit / 100, credit: l.credit / 100 })),
+  };
+  const out = $("result"); out.classList.remove("hidden"); out.textContent = "Mengirim ke Supabase...";
+  try {
+    const res = await fetch(SUPABASE_URL + "/rest/v1/rpc/fn_create_cash_out_voucher", {
+      method: "POST", headers: HEADERS, body: JSON.stringify(payload) });
+    const body = await res.text();
+    out.textContent = (res.ok ? "BERHASIL (header_id): " : "DITOLAK DATABASE (" + res.status + "): ") + body;
+  } catch (e) {
+    out.textContent = "Gagal terhubung. Payload yang akan dikirim:\n" + JSON.stringify(payload, null, 2);
+  }
+}
+async function loadAccounts() {
+  try {
+    const r = await fetch(SUPABASE_URL + "/rest/v1/chart_of_accounts?select=account_id,account_code,account_name,is_cash&order=account_code", { headers: HEADERS });
+    if (r.ok) { const d = await r.json(); if (d.length) accounts = d; }
+  } catch (_) { /* pakai akun contoh */ }
+  document.querySelectorAll(".acc").forEach(s => { const v = s.value; s.innerHTML = optionsHtml(); s.value = v; });
+}
+
+$("trxDate").valueAsDate = new Date();
+["trxDate", "refNo", "desc"].forEach(id => $(id).addEventListener("input", validate));
+$("addRow").onclick = () => { addRow(); validate(); };
+$("submitBtn").onclick = submit;
+addRow(); addRow(); validate(); loadAccounts();
+</script>
+</body>
+</html>
